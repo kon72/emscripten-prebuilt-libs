@@ -1,0 +1,111 @@
+name: build-and-deploy
+on:
+  push:
+    tags:
+      - '*'
+  workflow_dispatch:
+    inputs:
+      emscripten-version:
+        type: string
+        description: 'Emscripten version'
+        required: true
+      target:
+        type: string
+        description: 'Build target'
+        required: true
+        default: 'SYSTEM'
+
+permissions: {}
+
+jobs:
+  build-and-deploy:
+    name: ${{ matrix.cpu.suffix }}${{ matrix.lto.suffix }}${{ matrix.pic.suffix }} ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.emscripten-version || github.ref_name }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cpu:
+          - { suffix: wasm32, args: '' }
+          - { suffix: wasm64, args: --wasm64 }
+        lto:
+          - { suffix: '', args: '' }
+          - { suffix: -lto, args: --lto }
+          - { suffix: -thinlto, args: --lto=thin }
+        pic:
+          - { suffix: '', args: '' }
+          - { suffix: -pic, args: --pic }
+    steps:
+      - name: Set environment variables
+        run: |
+          EMSCRIPTEN_VERSION="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.emscripten-version || github.ref_name }}"
+          BUILD_TARGET="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target || 'SYSTEM' }}"
+          BUILD_DIR=build
+          EMSDK_DIR="${BUILD_DIR}/emsdk"
+          EMSCRIPTEN_DIR="${EMSDK_DIR}/upstream/emscripten"
+          EMSCRIPTEN_SYSTEM_LIB_ROOT="${EMSCRIPTEN_DIR}/cache/sysroot"
+          EMSCRIPTEN_SYSTEM_LIB_SUBDIR="lib/${{ matrix.cpu.suffix }}-emscripten"
+          BUILD_NAME="${{ matrix.cpu.suffix }}${{ matrix.lto.suffix }}${{ matrix.pic.suffix }}"
+          EMBUILDER_ARGS="${{ matrix.cpu.args }} ${{ matrix.lto.args }} ${{ matrix.pic.args }}"
+          DIST_DIR=dist
+          ARCHIVE_NAME="emscripten-system-lib-${BUILD_NAME}.tbz2"
+
+          mkdir -p "${BUILD_DIR}"
+          mkdir -p "${DIST_DIR}"
+
+          echo "EMSCRIPTEN_VERSION=${EMSCRIPTEN_VERSION}" >> $GITHUB_ENV
+          echo "BUILD_TARGET=${BUILD_TARGET}" >> $GITHUB_ENV
+          echo "BUILD_DIR=${BUILD_DIR}" >> $GITHUB_ENV
+          echo "EMSDK_DIR=${EMSDK_DIR}" >> $GITHUB_ENV
+          echo "EMSCRIPTEN_DIR=${EMSCRIPTEN_DIR}" >> $GITHUB_ENV
+          echo "EMSCRIPTEN_SYSTEM_LIB_ROOT=${EMSCRIPTEN_SYSTEM_LIB_ROOT}" >> $GITHUB_ENV
+          echo "EMSCRIPTEN_SYSTEM_LIB_SUBDIR=${EMSCRIPTEN_SYSTEM_LIB_SUBDIR}" >> $GITHUB_ENV
+          echo "DIST_DIR=${DIST_DIR}" >> $GITHUB_ENV
+          echo "BUILD_NAME=${BUILD_NAME}" >> $GITHUB_ENV
+          echo "EMBUILDER_ARGS=${EMBUILDER_ARGS}" >> $GITHUB_ENV
+          echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> $GITHUB_ENV
+      - name: Print environment variables
+        run: |
+          echo "github.event_name=${{ github.event_name }}"
+          echo "EMSCRIPTEN_VERSION=${{ env.EMSCRIPTEN_VERSION }}"
+          echo "BUILD_TARGET=${{ env.BUILD_TARGET }}"
+          echo "BUILD_DIR=${{ env.BUILD_DIR }}"
+          echo "EMSDK_DIR=${{ env.EMSDK_DIR }}"
+          echo "EMSCRIPTEN_DIR=${{ env.EMSCRIPTEN_DIR }}"
+          echo "EMSCRIPTEN_SYSTEM_LIB_ROOT=${{ env.EMSCRIPTEN_SYSTEM_LIB_ROOT }}"
+          echo "EMSCRIPTEN_SYSTEM_LIB_SUBDIR=${{ env.EMSCRIPTEN_SYSTEM_LIB_SUBDIR }}"
+          echo "DIST_DIR=${{ env.DIST_DIR }}"
+          echo "BUILD_NAME=${{ env.BUILD_NAME }}"
+          echo "EMBUILDER_ARGS=${{ env.EMBUILDER_ARGS }}"
+          echo "ARCHIVE_NAME=${{ env.ARCHIVE_NAME }}"
+      - name: Checkout emsdk
+        uses: actions/checkout@v4
+        with:
+          repository: emscripten-core/emsdk
+          ref: ${{ env.EMSCRIPTEN_VERSION }}
+          path: ${{ env.EMSDK_DIR }}
+      - name: Install and activate emsdk
+        run: |
+          "${{ env.EMSDK_DIR }}/emsdk" install ${{ env.EMSCRIPTEN_VERSION }}
+          "${{ env.EMSDK_DIR }}/emsdk" activate ${{ env.EMSCRIPTEN_VERSION }}
+      - name: Clear cache
+        run: |
+          source "${{ env.EMSDK_DIR }}/emsdk_env.sh"
+          "${{ env.EMSCRIPTEN_DIR }}/embuilder" clear SYSTEM
+      - name: Ensure cache is empty
+        run: |
+          rm -rf "${{ env.EMSCRIPTEN_SYSTEM_LIB_ROOT }}/${{ env.EMSCRIPTEN_SYSTEM_LIB_SUBDIR }}"
+      - name: Build system libraries
+        run: |
+          source "${{ env.EMSDK_DIR }}/emsdk_env.sh"
+          "${{ env.EMSCRIPTEN_DIR }}/embuilder" build ${{ env.BUILD_TARGET }} ${{ env.EMBUILDER_ARGS }}
+      - name: Archive system libraries
+        run: |
+          tar cjf "${{ env.DIST_DIR }}/${{ env.ARCHIVE_NAME }}" -C "${{ env.EMSCRIPTEN_SYSTEM_LIB_ROOT }}" "${{ env.EMSCRIPTEN_SYSTEM_LIB_SUBDIR }}"
+          ls -lh "${{ env.DIST_DIR }}"
+      - name: Upload system libraries to Release
+        if: github.event_name == 'push' && startsWith(github.ref,'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ env.DIST_DIR }}/${{ env.ARCHIVE_NAME }}
